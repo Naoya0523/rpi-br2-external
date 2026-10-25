@@ -1,0 +1,6 @@
+
+config BR2_PACKAGE_VL53L1X
+    bool "VL53L1X-driver"
+    help
+      Costom sensor driver
+      

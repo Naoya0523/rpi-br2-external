@@ -1,0 +1,2 @@
+
+source "$BR2_EXTERNAL_MYBOARD_PATH/package/vl53l1x/Config.in"
