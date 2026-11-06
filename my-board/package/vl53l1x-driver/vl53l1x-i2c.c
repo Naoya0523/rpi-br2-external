@@ -6,7 +6,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/unaligned.h>
-#include <linux/string.h>
+#include <linux/regmap.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/buffer.h>
@@ -16,7 +16,16 @@
 
 #define VL53L1X_CHUNK_SIZE 32
 
-#define VL_REG_CONFIG_START_ADDR	0x002D
+#define VL53L1X_REG_CONFIG_START_ADDR			0x002D
+
+#define VL53L1X_REG_SYSTEM__MODE_START 			0x0087
+
+#define VL53L1X_REG_IDENTIFICATION__MODEL_ID	0x010F
+
+#define VL53L1X_MODE_START						0x40
+#define VL53L1X_MODE_STOP						0x00
+#define VL53L1X_MODEL_ID_VAL					0xEA
+
 
 // default configuration
 const u8 VL51L1X_DEFAULT_CONFIGURATION[] = {
@@ -115,52 +124,63 @@ const u8 VL51L1X_DEFAULT_CONFIGURATION[] = {
 
 // data class
 struct vl53l1x_data {
-	struct i2c_client *client;
+	struct regmap *regmap;
 	struct completion completion;
-	struct regulator *vdd_supply;
 	struct gpio_desc *reset_gpio;
-	struct iio_trigger *trig;
 };
 
-int vl53l1x_write_byte(struct i2c_client *client, const u16 reg, const u8 data)
+static const struct regmap_config vl53l1x_regmap_config = {
+	.reg_bits = 16,
+	.val_bits = 8,
+	.reg_format_endian = REGMAP_ENDIAN_BIG,
+	.cache_type = REGCACHE_NONE,
+};
+
+static int vl53l1x_read(struct vl53l1x_data *data, const u16 reg, u8 *val)
 {
 	int ret;
 
-	ret = i2c_smbus_write_byte_data(client, reg, data);
-	if (ret < 0) {
-		dev_err(&client->dev, "Faild to write byte to reg 0x%04X: %d\n", reg, ret);
+	ret = regmap_read(data->regmap, reg, val);
+	if (ret)
 		return ret;
-	}
 
 	return 0;
 }
 
-int vl53l1x_write_multi(struct i2c_client *client, u16 reg, const u8 *data, size_t count)
+static int vl53l1x_read_u16(struct vl53l1x_data *data, const u16 reg, u16 *val)
+{
+	__be16 buf;
+	int ret;
+
+	ret = regmap_bulk_read(data->regmap, reg, &buf, sizeof(buf));
+	if (ret)
+		return ret;
+
+	*val = be16_to_cpu(buf);
+	return 0;
+}
+
+
+static int vl53l1x_write(struct vl53l1x_data *data, const u16 reg, const u8 *val)
+{
+	return regmap_write(data->regmap, reg, val);
+}
+
+static int vl53l1x_write_u16(struct vl53l1x_data *data, const u16 reg, const u16 *val)
+{
+	__be16 buf = cpu_to_be16(val);
+
+	return regmap_bulk_write(data->regmap, reg, &buf, sizeof(buf));
+	
+}
+
+static int vl53l1x_start_ranging(struct vl53l1x_data *data)
 {
 	int ret;
-	size_t offset = 0;
-
-	while (offset < count) {
-		int remaining = count - offset;
-		int current_chunk = (remaining < VL53L1X_CHUNK_SIZE) ? remaining : VL53L1X_CHUNK_SIZE;
-
-		u8 buf[VL53L1X_CHUNK_SIZE + 2];
-		u16 current_reg = reg + offset;
-
-		buf[0] = (current_reg >> 8) & 0xFF;
-		buf[1] = current_reg & 0xFF;
-
-		memcpy(&buf[2], &data[offset], current_chunk);
-
-		ret = i2c_smbus_write_block_data(client, buf, current_chunk + 2);
-		if (ret < 0) {
-			dev_err(&client->dev, "Faild to write block to reg 0x%04X: %d\n", current_reg, ret);
-			return ret;
-		}
-
-		offset += current_chunk;
-	}
-
+	ret = vl53l1x_write(data->regmap, VL53L1X_REG_SYSTEM__MODE_START, VL53L1X_MODE_START);
+	if (ret)
+		return ret;
+	
 	return 0;
 }
 
@@ -183,6 +203,40 @@ static const struct iio_chan_spec vl53l1x_channels[] = {
 // probe
 static int vl53l1x_probe(struct i2c_client *client)
 {
+	struct vl53l1x_data *data;
+	struct iio_dev *indio_dev;
+	struct device *dev = &client->dev;
+	int ret;
+	u8 model_id;
+
+	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
+	if (!indio_dev)
+		return -ENOMEM;
+	
+	data = iio_priv(indio_dev);
+	
+	data->regmap = devm_regmap_init_i2c(client, &vl53l1x_regmap_config);
+	if (IS_ERR(data->regmap))
+		return dev_err_probe(&client->dev, 
+			PTR_ERR(data->regmap), "Failed to initalize regmap\n");
+
+	/* vdd setting */
+	ret = devm_regulator_get_enable(dev, "vdd");
+	if (ret)
+		return dev_err_probe(dev, ret, "Faild to enable VDD regulators\n");
+
+	/* reset GPIO setting */
+	data->reset_gpio = devm_gpiod_get_optional(dev, "xshut", GPIOD_OUT_HIGH);
+	if (IS_ERR(data->reset_gpio))
+		return PTR_ERR(data->reset_gpio);
+
+	/* model check */
+	ret = vl53l1x_read(data->regmap, VL53L1X_REG_IDENTIFICATION__MODEL_ID, &model_id);
+	if (ret)
+		return ret;
+
+	if (model_id != VL53L1X_MODEL_ID_VAL)
+		dev_info(dev, "unknown model. id: 0x%04x, continuing\n", model_id);
 
 };
 
