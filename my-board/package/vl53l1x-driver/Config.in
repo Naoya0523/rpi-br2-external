@@ -1,5 +1,5 @@
 
-config BR2_PACKAGE_VL53L1X
+config BR2_PACKAGE_VL53L1X_DRIVER
     bool "VL53L1X-driver"
     help
-      Costom sensor driver
+      Costom VL53L1X ToF sensor kernel driver
