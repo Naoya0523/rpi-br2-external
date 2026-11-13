@@ -216,26 +216,56 @@ static int vl53l1x_stop_ranging(struct vl53l1x_data *data)
 	return 0;
 }
 
+static int vl53l1x_get_interrupt_polarity(struct vl53l1x_data *data, u8 *polarity)
+{
+	int ret;
+	u8 temp;
+
+	ret = regmap_read(data->regmap, VL53L1X_REG_GPIO_HV_MUX__CTRL, &temp);
+
+	if (ret)
+		return ret;
+
+	temp = temp & 0x10;
+	*polarity = !(temp >> 4);
+	return 0;
+}
 
 
-
-static int vl53l1x_check_ready(struct vl53l1x_data *data)
+static int vl53l1x_check_ready(struct vl53l1x_data *data, u8 *is_ready)
 {
 	int ret;
 	u8 temp;
 	u8 int_pol;
 
-	ret = regmap_read(data->regmap, )
+	ret = vl53l1x_get_interrupt_polarity(data, &int_pol);
+	ret |= regmap_read(data->regmap, VL53L1X_REG_FIRMWARE__SYSTEM_STATUS, &temp);
+
+	if (ret)
+		return ret;
+
+	if (ret == 0) {
+		if ((temp & 1) == int_pol)
+			*is_ready = 1;
+		else
+			*is_ready = 0;
+	}
+
+	return 0;
 }
 
 
 static int vl53l1x_init(struct vl53l1x_data *data)
 {
-	int sensor_state;
+	u8 sensor_state;
 	int ret;
 
 	while (sensor_state == 0) {
 		regmap_read(data->regmap, VL53L1X_REG_FIRMWARE__SYSTEM_STATUS, &sensor_state);
+
+		if (ret)
+			return ret;
+
 		fsleep(5);
 	}
 
