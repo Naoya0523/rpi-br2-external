@@ -21,6 +21,7 @@
 #define VL53L1X_REG_GPIO_HV_MUX__CTRL			0x0030
 #define VL53L1X_REG_GPIO__TIO_HV_STATUS			0x0031
 
+#define VL53L1X_REG_SYSTEM__INTERRUPT_CLEAR		0x0086
 #define VL53L1X_REG_SYSTEM__MODE_START 			0x0087
 #define VL53L1X_REG_FIRMWARE__SYSTEM_STATUS		0x00E5
 #define VL53L1X_REG_IDENTIFICATION__MODEL_ID	0x010F
@@ -29,6 +30,7 @@
 #define VL53L1X_MODE_START						0x40
 #define VL53L1X_MODE_STOP						0x00
 #define VL53L1X_MODEL_ID_VAL					0xEA
+#define VL53L1X_RESET_INTERRUPT					0x01
 
 
 /*
@@ -142,6 +144,22 @@ static const struct regmap_config vl53l1x_regmap_config = {
 	.cache_type = REGCACHE_NONE,
 };
 
+static const struct iio_chan_spec vl53l1x_channels[] = {
+	{
+		.type = IIO_DISTANCE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
+				      BIT(IIO_CHAN_INFO_SCALE),
+		.scan_index = 0,
+		.scan_type = {
+			.sign = 'u',
+			.realbits = 16,
+			.storagebits = 16,
+		},
+	},
+	IIO_CHAN_SOFT_TIMESTAMP(1),
+};
+
+
 
 static int vl53l1x_read_u16(struct vl53l1x_data *data, const u16 reg, u16 *val)
 {
@@ -163,32 +181,6 @@ static int vl53l1x_write_u16(struct vl53l1x_data *data, const u16 reg, const u16
 	return regmap_bulk_write(data->regmap, reg, &buf, sizeof(buf));
 	
 }
-
-static int vl53l1x_start_ranging(struct vl53l1x_data *data)
-{
-	int ret;
-	ret = vl53l1x_write(data->regmap, VL53L1X_REG_SYSTEM__MODE_START, VL53L1X_MODE_START);
-	if (ret)
-		return ret;
-	
-	return 0;
-}
-
-
-static const struct iio_chan_spec vl53l1x_channels[] = {
-	{
-		.type = IIO_DISTANCE,
-		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
-				      BIT(IIO_CHAN_INFO_SCALE),
-		.scan_index = 0,
-		.scan_type = {
-			.sign = 'u',
-			.realbits = 16,
-			.storagebits = 16,
-		},
-	},
-	IIO_CHAN_SOFT_TIMESTAMP(1),
-};
 
 
 static int vl53l1x_start_ranging(struct vl53l1x_data *data)
@@ -239,8 +231,10 @@ static int vl53l1x_check_ready(struct vl53l1x_data *data, u8 *is_ready)
 	u8 int_pol;
 
 	ret = vl53l1x_get_interrupt_polarity(data, &int_pol);
-	ret |= regmap_read(data->regmap, VL53L1X_REG_FIRMWARE__SYSTEM_STATUS, &temp);
+	if (ret)
+		return ret;
 
+	ret = regmap_read(data->regmap, VL53L1X_REG_FIRMWARE__SYSTEM_STATUS, &temp);
 	if (ret)
 		return ret;
 
@@ -254,11 +248,24 @@ static int vl53l1x_check_ready(struct vl53l1x_data *data, u8 *is_ready)
 	return 0;
 }
 
+static int vl53l1x_clear_interrupt(struct vl53l1x_data *data)
+{
+	int ret;
+
+	ret = regmap_write(data->regmap, VL53L1X_REG_SYSTEM__INTERRUPT_CLEAR, VL53L1X_RESET_INTERRUPT);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
 
 static int vl53l1x_init(struct vl53l1x_data *data)
 {
 	u8 sensor_state;
+	u8 is_ready = 0;
 	int ret;
+	int timeout_count = 0;
 
 	while (sensor_state == 0) {
 		regmap_read(data->regmap, VL53L1X_REG_FIRMWARE__SYSTEM_STATUS, &sensor_state);
@@ -283,8 +290,23 @@ static int vl53l1x_init(struct vl53l1x_data *data)
 	if (ret)
 		return ret;
 
+	while (is_ready == 0) {
+		ret = vl53l1x_check_ready(data, &is_ready);
+
+		timeout_count ++;
+		if (timeout_count >= 1000)
+			return -1;
+
+		fsleep(10);
+	}
 	
-	
+	ret = vl53l1x_clear_interrupt(data);
+	if (ret)
+		return ret;
+
+	ret = vl53l1x_stop_ranging(data);
+	if (ret)
+		return ret;
 }
 
 // probe
